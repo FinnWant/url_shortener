@@ -126,7 +126,7 @@ def test_invalid_codes(client, code):
 
 
 def test_reserved_paths_not_redirects(client):
-    assert client.get("/admin").status_code == 404
+    assert client.get("/api").status_code == 404
     assert client.get("/static").status_code == 404
 
 

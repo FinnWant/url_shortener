@@ -23,6 +23,15 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
   - `GET /api/links` (includes click counts)
   - `DELETE /api/links/{code}` → 204 (also deletes its clicks)
 
+  - `GET /api/links/{code}/stats[?days=30]` → clicks per day (UTC, zero-filled), top 10 referrers (`(direct)` when absent), browser families
+
+## Admin page
+
+`/admin` (static, no external assets): enter the admin token once (kept in
+`sessionStorage`, cleared on sign-out/401), create/delete links, see total clicks,
+and per-link stats with a 30-day bar chart. The chart is a small dependency-free
+SVG implementation in `app/static/chart.js` (no CDN, no vendored library needed).
+
 Targets must be http/https. Codes: 1–32 of `A-Za-z0-9_-`; `api`, `admin`, `static`, `health` are reserved (case-insensitive).
 
 ## Test

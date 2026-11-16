@@ -1,0 +1,6 @@
+body{font:15px system-ui,sans-serif;max-width:60rem;margin:2rem auto;padding:0 1rem}
+table{border-collapse:collapse;width:100%;margin:1rem 0}
+td,th{border-bottom:1px solid #ddd;padding:.3rem .5rem;text-align:left;overflow-wrap:anywhere}
+.cols{display:flex;gap:2rem}.cols>div{flex:1}
+#msg{color:#b00020}
+.bar{fill:#2563eb}.bar:hover{fill:#1e40af}.axis{font-size:10px;fill:#555}

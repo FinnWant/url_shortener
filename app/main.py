@@ -5,14 +5,17 @@ import re
 import secrets
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
+STATIC_DIR = Path(__file__).parent / "static"
 RESERVED_CODES = {"api", "admin", "static", "health"}
 CODE_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -169,7 +172,44 @@ def create_app(db_path: str | None = None, admin_token: str | None = None) -> Fa
                 raise HTTPException(404, "link not found")
             c.execute("DELETE FROM clicks WHERE code=?", (code,))
 
+    @api.get("/links/{code}/stats")
+    def link_stats(code: str, days: int = 30):
+        days = max(1, min(days, 365))
+        today = datetime.now(timezone.utc).date()
+        start = today - timedelta(days=days - 1)
+        with closing(connect()) as c:
+            link = c.execute(q + " WHERE l.code=?", (code,)).fetchone()
+            if link is None:
+                raise HTTPException(404, "link not found")
+            # clicked_at is ISO-8601 UTC, so the first 10 chars are the date.
+            per_day = dict(c.execute(
+                "SELECT substr(clicked_at,1,10), COUNT(*) FROM clicks "
+                "WHERE code=? AND substr(clicked_at,1,10)>=? GROUP BY 1",
+                (code, start.isoformat())).fetchall())
+            refs = c.execute(
+                "SELECT COALESCE(NULLIF(referrer,''),'(direct)') AS r, COUNT(*) AS n "
+                "FROM clicks WHERE code=? GROUP BY r ORDER BY n DESC, r LIMIT 10",
+                (code,)).fetchall()
+            ua = c.execute(
+                "SELECT ua_family AS f, COUNT(*) AS n FROM clicks WHERE code=? "
+                "GROUP BY f ORDER BY n DESC, f", (code,)).fetchall()
+        return {
+            **row(link),
+            "clicks_per_day": [
+                {"date": (start + timedelta(days=i)).isoformat(),
+                 "clicks": per_day.get((start + timedelta(days=i)).isoformat(), 0)}
+                for i in range(days)],
+            "top_referrers": [{"referrer": r["r"], "clicks": r["n"]} for r in refs],
+            "browsers": [{"family": r["f"], "clicks": r["n"]} for r in ua],
+        }
+
     app.include_router(api)
+
+    @app.get("/admin", include_in_schema=False)
+    def admin_page():
+        return FileResponse(STATIC_DIR / "admin.html")
+
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/health", response_class=PlainTextResponse)
     def health():
