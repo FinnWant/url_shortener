@@ -1,0 +1,24 @@
+[Unit]
+Description=Link shortener (uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=linkshort
+Group=linkshort
+WorkingDirectory=/opt/link-shortener
+EnvironmentFile=/etc/link-shortener.env
+ExecStart=/opt/link-shortener/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8301 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=3
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/link-shortener
+StateDirectory=link-shortener
+
+[Install]
+WantedBy=multi-user.target

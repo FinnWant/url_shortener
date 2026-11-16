@@ -4,6 +4,8 @@ import os
 import re
 import secrets
 import sqlite3
+import time
+from collections import defaultdict, deque
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -86,7 +88,34 @@ class LinkIn(BaseModel):
     code: str | None = None
 
 
-def create_app(db_path: str | None = None, admin_token: str | None = None) -> FastAPI:
+def create_app(db_path: str | None = None, admin_token: str | None = None,
+               rate_limit: int | None = None, rate_window: float | None = None) -> FastAPI:
+    # Redirect rate limit per IP hash: at most `rate_limit` requests per
+    # `rate_window` seconds (0 disables). In-memory, per process.
+    if rate_limit is None:
+        rate_limit = int(os.environ.get("RATE_LIMIT", "60"))
+    if rate_window is None:
+        rate_window = float(os.environ.get("RATE_WINDOW", "60"))
+    hits: dict[str, deque] = defaultdict(deque)
+    last_sweep = [time.monotonic()]
+
+    def rate_limited(key: str) -> float | None:
+        """Record a hit; return seconds to wait if over the limit, else None."""
+        if rate_limit <= 0:
+            return None
+        t = time.monotonic()
+        if t - last_sweep[0] > rate_window:  # drop idle keys to bound memory
+            last_sweep[0] = t
+            for k in [k for k, d in hits.items() if not d or t - d[-1] > rate_window]:
+                del hits[k]
+        d = hits[key]
+        while d and t - d[0] > rate_window:
+            d.popleft()
+        if len(d) >= rate_limit:
+            return max(0.0, rate_window - (t - d[0]))
+        d.append(t)
+        return None
+
     db_path = db_path or os.environ.get("DB_PATH")
     admin_token = admin_token or os.environ.get("ADMIN_TOKEN")
     if not admin_token:
@@ -220,16 +249,21 @@ def create_app(db_path: str | None = None, admin_token: str | None = None) -> Fa
         if code.lower() in RESERVED_CODES:
             raise HTTPException(404, "not found")
         now = datetime.now(timezone.utc)
+        ip = request.client.host if request.client else "unknown"
+        h = ip_hash(ip, now)
+        wait = rate_limited(h)
+        if wait is not None:
+            raise HTTPException(429, "too many requests",
+                                headers={"Retry-After": str(int(wait) + 1)})
         with closing(connect()) as c, c:
             r = c.execute("SELECT target FROM links WHERE code=?", (code,)).fetchone()
             if r is None:
                 raise HTTPException(404, "not found")
-            ip = request.client.host if request.client else "unknown"
             c.execute(
                 "INSERT INTO clicks (code, clicked_at, referrer, ua_family, ip_hash) "
                 "VALUES (?,?,?,?,?)",
                 (code, now.isoformat(), request.headers.get("referer"),
-                 ua_family(request.headers.get("user-agent")), ip_hash(ip, now)),
+                 ua_family(request.headers.get("user-agent")), h),
             )
         return RedirectResponse(r["target"], status_code=302)
 
