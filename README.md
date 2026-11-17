@@ -11,6 +11,25 @@ export DB_PATH=./shortener.db     # required; SQLite file (created if missing)
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+## Install on an Ubuntu server
+
+Short version (systemd service as a dedicated user, listening on `127.0.0.1:8301`):
+
+```
+sudo apt update && sudo apt install -y python3-venv git
+sudo useradd --system --home /opt/link-shortener --shell /usr/sbin/nologin linkshort
+sudo git clone <REPO_URL> /opt/link-shortener && cd /opt/link-shortener
+sudo python3 -m venv .venv && sudo .venv/bin/pip install -r requirements.txt
+sudo install -m 600 -o root -g root deploy/link-shortener.env.example /etc/link-shortener.env
+sudo sed -i "s/^ADMIN_TOKEN=.*/ADMIN_TOKEN=$(openssl rand -hex 24)/" /etc/link-shortener.env
+sudo cp deploy/link-shortener.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now link-shortener
+curl http://127.0.0.1:8301/health   # -> ok
+```
+
+Put nginx/Caddy in front for TLS (it must set `X-Forwarded-For`). See
+[DEPLOY.md](DEPLOY.md) for updating, rate limiting, the nginx example and backups.
+
 ## API
 
 - `GET /health` → `ok`
