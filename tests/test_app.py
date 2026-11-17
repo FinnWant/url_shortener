@@ -126,7 +126,7 @@ def test_invalid_codes(client, code):
 
 
 def test_reserved_paths_not_redirects(client):
-    assert client.get("/admin").status_code == 404
+    assert client.get("/api").status_code == 404
     assert client.get("/static").status_code == 404
 
 
@@ -137,3 +137,16 @@ def test_refuses_to_start_without_token(tmp_path, monkeypatch):
     monkeypatch.setenv("ADMIN_TOKEN", "")
     with pytest.raises(RuntimeError):
         create_app(db_path=str(tmp_path / "x.db"))
+
+
+def test_redirect_rate_limit(tmp_path):
+    app = create_app(db_path=str(tmp_path / "r.db"), admin_token=TOKEN,
+                     rate_limit=3, rate_window=60)
+    c = TestClient(app, follow_redirects=False)
+    c.post("/api/links", json={"target": "https://example.com", "code": "abc"}, headers=H)
+    assert [c.get("/abc").status_code for _ in range(3)] == [302, 302, 302]
+    r = c.get("/abc")
+    assert r.status_code == 429 and int(r.headers["retry-after"]) >= 1
+    # API and health are not limited; clicks only recorded for allowed hits
+    assert c.get("/health").status_code == 200
+    assert c.get("/api/links", headers=H).json()[0]["clicks"] == 3

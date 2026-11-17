@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Shortener admin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/admin.css"></head>
+<body>
+<h1>Shortener admin</h1>
+<form id="login" hidden>
+  <label>Admin token <input type="password" id="token" autocomplete="off" required></label>
+  <button>Sign in</button>
+</form>
+<div id="app" hidden>
+  <p><button id="logout" type="button">Sign out</button></p>
+  <form id="create">
+    <input id="target" type="url" placeholder="https://example.com/long" required size="40">
+    <input id="code" placeholder="custom code (optional)" pattern="[A-Za-z0-9_\-]{1,32}">
+    <button>Create</button>
+  </form>
+  <table id="links"><thead><tr><th>Code</th><th>Target</th><th>Clicks</th><th></th></tr></thead><tbody></tbody></table>
+  <section id="stats" hidden>
+    <h2>Stats for <span id="stats-code"></span></h2>
+    <h3>Clicks per day (last 30 days)</h3><div id="chart"></div>
+    <div class="cols"><div><h3>Top referrers</h3><ul id="refs"></ul></div>
+    <div><h3>Browsers</h3><ul id="browsers"></ul></div></div>
+  </section>
+</div>
+<p id="msg" role="alert"></p>
+<script src="/static/chart.js"></script>
+<script src="/static/admin.js"></script>
+</body></html>

@@ -4,15 +4,20 @@ import os
 import re
 import secrets
 import sqlite3
+import time
+from collections import defaultdict, deque
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
+STATIC_DIR = Path(__file__).parent / "static"
 RESERVED_CODES = {"api", "admin", "static", "health"}
 CODE_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -83,7 +88,34 @@ class LinkIn(BaseModel):
     code: str | None = None
 
 
-def create_app(db_path: str | None = None, admin_token: str | None = None) -> FastAPI:
+def create_app(db_path: str | None = None, admin_token: str | None = None,
+               rate_limit: int | None = None, rate_window: float | None = None) -> FastAPI:
+    # Redirect rate limit per IP hash: at most `rate_limit` requests per
+    # `rate_window` seconds (0 disables). In-memory, per process.
+    if rate_limit is None:
+        rate_limit = int(os.environ.get("RATE_LIMIT", "60"))
+    if rate_window is None:
+        rate_window = float(os.environ.get("RATE_WINDOW", "60"))
+    hits: dict[str, deque] = defaultdict(deque)
+    last_sweep = [time.monotonic()]
+
+    def rate_limited(key: str) -> float | None:
+        """Record a hit; return seconds to wait if over the limit, else None."""
+        if rate_limit <= 0:
+            return None
+        t = time.monotonic()
+        if t - last_sweep[0] > rate_window:  # drop idle keys to bound memory
+            last_sweep[0] = t
+            for k in [k for k, d in hits.items() if not d or t - d[-1] > rate_window]:
+                del hits[k]
+        d = hits[key]
+        while d and t - d[0] > rate_window:
+            d.popleft()
+        if len(d) >= rate_limit:
+            return max(0.0, rate_window - (t - d[0]))
+        d.append(t)
+        return None
+
     db_path = db_path or os.environ.get("DB_PATH")
     admin_token = admin_token or os.environ.get("ADMIN_TOKEN")
     if not admin_token:
@@ -169,7 +201,44 @@ def create_app(db_path: str | None = None, admin_token: str | None = None) -> Fa
                 raise HTTPException(404, "link not found")
             c.execute("DELETE FROM clicks WHERE code=?", (code,))
 
+    @api.get("/links/{code}/stats")
+    def link_stats(code: str, days: int = 30):
+        days = max(1, min(days, 365))
+        today = datetime.now(timezone.utc).date()
+        start = today - timedelta(days=days - 1)
+        with closing(connect()) as c:
+            link = c.execute(q + " WHERE l.code=?", (code,)).fetchone()
+            if link is None:
+                raise HTTPException(404, "link not found")
+            # clicked_at is ISO-8601 UTC, so the first 10 chars are the date.
+            per_day = dict(c.execute(
+                "SELECT substr(clicked_at,1,10), COUNT(*) FROM clicks "
+                "WHERE code=? AND substr(clicked_at,1,10)>=? GROUP BY 1",
+                (code, start.isoformat())).fetchall())
+            refs = c.execute(
+                "SELECT COALESCE(NULLIF(referrer,''),'(direct)') AS r, COUNT(*) AS n "
+                "FROM clicks WHERE code=? GROUP BY r ORDER BY n DESC, r LIMIT 10",
+                (code,)).fetchall()
+            ua = c.execute(
+                "SELECT ua_family AS f, COUNT(*) AS n FROM clicks WHERE code=? "
+                "GROUP BY f ORDER BY n DESC, f", (code,)).fetchall()
+        return {
+            **row(link),
+            "clicks_per_day": [
+                {"date": (start + timedelta(days=i)).isoformat(),
+                 "clicks": per_day.get((start + timedelta(days=i)).isoformat(), 0)}
+                for i in range(days)],
+            "top_referrers": [{"referrer": r["r"], "clicks": r["n"]} for r in refs],
+            "browsers": [{"family": r["f"], "clicks": r["n"]} for r in ua],
+        }
+
     app.include_router(api)
+
+    @app.get("/admin", include_in_schema=False)
+    def admin_page():
+        return FileResponse(STATIC_DIR / "admin.html")
+
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/health", response_class=PlainTextResponse)
     def health():
@@ -180,16 +249,21 @@ def create_app(db_path: str | None = None, admin_token: str | None = None) -> Fa
         if code.lower() in RESERVED_CODES:
             raise HTTPException(404, "not found")
         now = datetime.now(timezone.utc)
+        ip = request.client.host if request.client else "unknown"
+        h = ip_hash(ip, now)
+        wait = rate_limited(h)
+        if wait is not None:
+            raise HTTPException(429, "too many requests",
+                                headers={"Retry-After": str(int(wait) + 1)})
         with closing(connect()) as c, c:
             r = c.execute("SELECT target FROM links WHERE code=?", (code,)).fetchone()
             if r is None:
                 raise HTTPException(404, "not found")
-            ip = request.client.host if request.client else "unknown"
             c.execute(
                 "INSERT INTO clicks (code, clicked_at, referrer, ua_family, ip_hash) "
                 "VALUES (?,?,?,?,?)",
                 (code, now.isoformat(), request.headers.get("referer"),
-                 ua_family(request.headers.get("user-agent")), ip_hash(ip, now)),
+                 ua_family(request.headers.get("user-agent")), h),
             )
         return RedirectResponse(r["target"], status_code=302)
 
